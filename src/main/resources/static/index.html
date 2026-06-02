@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Driver Test</title>
+    <script src="https://cdn.jsdelivr.net/sockjs/1.1.4/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 500px; margin: 40px auto; padding: 0 16px; color: #222; }
+        h2 { margin: 24px 0 8px; font-size: 1rem; color: #555; }
+        input { display: block; width: 100%; padding: 6px 8px; margin-bottom: 6px; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 7px 16px; margin-right: 6px; margin-bottom: 6px; font-size: 0.9rem; border: none; border-radius: 4px; cursor: pointer; background: #333; color: #fff; }
+        button:disabled { background: #aaa; cursor: not-allowed; }
+        #status { font-size: 0.85rem; margin-bottom: 16px; }
+        #status.on  { color: green; }
+        #status.off { color: red; }
+        #log { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 8px; height: 200px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; white-space: pre-wrap; }
+        hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
+
+        /* Popup overlay */
+        #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10; align-items: center; justify-content: center; }
+        #overlay.show { display: flex; }
+        #popup {
+            background: #fff; border-radius: 12px; padding: 28px 24px; width: 320px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.25); text-align: center; animation: pop .2s ease;
+        }
+        @keyframes pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        #popup h3 { margin: 0 0 4px; font-size: 1.1rem; }
+        #popup .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 20px; }
+        #popup .row { display: flex; justify-content: space-between; font-size: 0.9rem; padding: 6px 0; border-bottom: 1px solid #f0f0f0; }
+        #popup .row .label { color: #888; }
+        #popup .row .val { font-weight: 600; }
+        #popup .actions { margin-top: 20px; display: flex; gap: 10px; }
+        #popup .actions button { flex: 1; padding: 10px; font-size: 0.95rem; margin: 0; border-radius: 8px; }
+        #btnAcceptPopup  { background: #22c55e; }
+        #btnRejectPopup  { background: #ef4444; }
+        #timer { font-size: 0.75rem; color: #aaa; margin-top: 12px; }
+        #timerBar { height: 4px; background: #e5e7eb; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+        #timerFill { height: 100%; background: #22c55e; width: 100%; transition: width 1s linear; }
+    </style>
+</head>
+<body>
+
+<!-- Incoming ride popup -->
+<div id="overlay">
+    <div id="popup">
+        <h3>🚗 New Ride Request</h3>
+        <p class="subtitle">Respond before the timer runs out</p>
+        <div class="row"><span class="label">Booking ID</span><span class="val" id="popBookingId">—</span></div>
+        <div class="row"><span class="label">Passenger ID</span><span class="val" id="popPassengerId">—</span></div>
+        <div class="actions">
+            <button id="btnAcceptPopup" onclick="respond(true)">Accept</button>
+            <button id="btnRejectPopup" onclick="respond(false)">Reject</button>
+        </div>
+        <div id="timer">Auto-rejecting in <span id="timerCount">15</span>s</div>
+        <div id="timerBar"><div id="timerFill"></div></div>
+    </div>
+</div>
+
+<h1 style="font-size:1.2rem">Driver Test Client</h1>
+<div id="status" class="off">● Disconnected</div>
+
+<h2>Connect</h2>
+<input id="driverId" placeholder="Driver ID" value="1">
+<button id="btnConnect" onclick="connect()">Connect</button>
+<button id="btnDisconnect" onclick="disconnect()" disabled>Disconnect</button>
+
+<hr>
+
+<h2>Log</h2>
+<button onclick="document.getElementById('log').textContent=''" style="background:#888;font-size:0.75rem;padding:3px 10px;margin-bottom:6px">Clear</button>
+<div id="log"></div>
+
+<script>
+    var stompClient = null;
+    var pendingBooking = null;
+    var autoRejectTimer = null;
+    var TIMEOUT = 15;
+
+    function appendLog(msg) {
+        var el = document.getElementById('log');
+        el.textContent += '[' + new Date().toISOString().slice(11,19) + '] ' + msg + '\n';
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function setConnected(on) {
+        var s = document.getElementById('status');
+        s.textContent = on ? '● Connected as driver ' + document.getElementById('driverId').value : '● Disconnected';
+        s.className = on ? 'on' : 'off';
+        document.getElementById('btnConnect').disabled = on;
+        document.getElementById('btnDisconnect').disabled = !on;
+    }
+
+    function connect() {
+        var driverId = document.getElementById('driverId').value;
+        stompClient = Stomp.over(new SockJS('http://localhost:8090/ws'));
+        stompClient.debug = null;
+        stompClient.connect({}, function() {
+            setConnected(true);
+            appendLog('Connected. Subscribed to /topic/rideRequest/' + driverId);
+            stompClient.subscribe('/topic/rideRequest/' + driverId, function(frame) {
+                var body = JSON.parse(frame.body);
+                appendLog('Incoming ride — bookingId=' + body.bookingId + ' passengerId=' + body.passengerId);
+                showPopup(body);
+            });
+        }, function(err) {
+            appendLog('Error: ' + err);
+            setConnected(false);
+        });
+    }
+
+    function disconnect() {
+        if (stompClient) stompClient.disconnect(function() {
+            setConnected(false);
+            appendLog('Disconnected.');
+        });
+    }
+
+    function showPopup(body) {
+        pendingBooking = body;
+        document.getElementById('popBookingId').textContent   = body.bookingId;
+        document.getElementById('popPassengerId').textContent = body.passengerId;
+
+        // reset timer bar
+        var fill = document.getElementById('timerFill');
+        fill.style.transition = 'none';
+        fill.style.width = '100%';
+        document.getElementById('timerCount').textContent = TIMEOUT;
+        document.getElementById('overlay').classList.add('show');
+
+        // animate bar
+        setTimeout(function() {
+            fill.style.transition = 'width ' + TIMEOUT + 's linear';
+            fill.style.width = '0%';
+        }, 50);
+
+        // countdown
+        clearInterval(autoRejectTimer);
+        var remaining = TIMEOUT;
+        autoRejectTimer = setInterval(function() {
+            remaining--;
+            document.getElementById('timerCount').textContent = remaining;
+            if (remaining <= 0) {
+                clearInterval(autoRejectTimer);
+                appendLog('Auto-rejected bookingId=' + pendingBooking.bookingId + ' (timeout)');
+                respond(false);
+            }
+        }, 1000);
+    }
+
+    function closePopup() {
+        clearInterval(autoRejectTimer);
+        document.getElementById('overlay').classList.remove('show');
+        pendingBooking = null;
+    }
+
+    function respond(accepted) {
+        if (!pendingBooking) return;
+        var driverId  = document.getElementById('driverId').value;
+        var bookingId = pendingBooking.bookingId;
+        stompClient.send('/app/rideResponse/' + driverId, {}, JSON.stringify({ response: accepted, bookingId: bookingId }));
+        appendLog((accepted ? 'Accepted' : 'Rejected') + ' ride — bookingId=' + bookingId);
+        closePopup();
+    }
+</script>
+
+</body>
+</html>
